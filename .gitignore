@@ -1,0 +1,13 @@
+__pycache__
+.venv
+*.egg-info
+.mypy_cache
+
+logs/
+data/
+
+# Will be added later
+legacy/
+
+*.code-workspace
+*.log

@@ -1,0 +1,37 @@
+# Camera calibration parameters for front camera
+# Camera: hdr_front
+# Original resolution: 1920x1280
+# Resized for model input: 476x308 (W x H)
+# Distortion model: equidistant (fisheye)
+
+height: 308
+width: 476
+distortion_model: "equidistant"
+
+# Intrinsic matrix K (3x3, row-major), scaled for 476x308 input
+# scale_x = 476 / 1920, scale_y = 308 / 1280
+K:
+  - 244.05108430203476
+  - 0.0
+  - 236.11386145656376
+  - 0.0
+  - 236.72937552218586
+  - 153.6724002262796
+  - 0.0
+  - 0.0
+  - 1.0
+
+# Distortion coefficients D (4 parameters for equidistant model)
+D:
+  - -0.06150262047071293
+  - 0.003455916289334078
+  - -0.001233506511528716
+  - -1.770797322903057e-7
+
+# Camera extrinsics E: T_camera_base (4x4 transformation matrix)
+# Transform from robot base frame to camera frame
+E:
+  - [-2.03673204e-04, -9.99999976e-01, 8.00535880e-05, 4.64263469e-04]
+  - [-2.03673199e-04, -8.00121053e-05, -9.99999976e-01, 1.70819283e-01]
+  - [9.99999959e-01, -2.03689504e-04, -2.03656898e-04, -4.25650426e-01]
+  - [0.0, 0.0, 0.0, 1.0]
