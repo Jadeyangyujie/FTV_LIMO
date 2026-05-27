@@ -21,3 +21,9 @@ shuffle_test: False
 with_side_cams: False
 
 image_size: [308, 476]
+
+# Optional FTV-LIMO sequence output. Disabled by default.
+return_image_seq: False
+temporal_len: 4
+temporal_stride: 1
+camera_views: ["front", "left", "right"]

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, Tuple
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
@@ -25,6 +25,10 @@ class LimoDataModule(LightningDataModule):
         shuffle_test: bool = False,
         with_side_cams: bool = False,
         image_size: Tuple[int, int] = (308, 476),
+        return_image_seq: bool = False,
+        temporal_len: int = 4,
+        temporal_stride: int = 1,
+        camera_views: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -40,6 +44,10 @@ class LimoDataModule(LightningDataModule):
         self.shuffle_test = shuffle_test
         self.with_side_cams = with_side_cams
         self.image_size = image_size
+        self.return_image_seq = return_image_seq
+        self.temporal_len = temporal_len
+        self.temporal_stride = temporal_stride
+        self.camera_views = camera_views
 
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
@@ -56,6 +64,10 @@ class LimoDataModule(LightningDataModule):
                 missions_csv=self.missions_csv,
                 with_side_cams=self.with_side_cams,
                 image_size=self.image_size,
+                return_image_seq=self.return_image_seq,
+                temporal_len=self.temporal_len,
+                temporal_stride=self.temporal_stride,
+                camera_views=self.camera_views,
             )
 
             self.data_train = splits.get("train")

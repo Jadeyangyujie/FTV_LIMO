@@ -5,11 +5,11 @@ import tarfile
 from collections import defaultdict
 from itertools import product
 from pathlib import Path
-from typing import Literal, Tuple
+from typing import Literal, Sequence, Tuple
 
 import torch
 import zarr
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from torch.utils.data import ConcatDataset, Dataset
 from torchvision import transforms
@@ -17,6 +17,30 @@ from torchvision import transforms
 from limo.src.utils.pylogger import RankedLogger
 
 log = RankedLogger(__name__, rank_zero_only=True)
+
+CAMERA_VIEW_TO_TOPIC = {
+    "front": "hdr_front",
+    "left": "hdr_left",
+    "right": "hdr_right",
+}
+DEFAULT_CAMERA_VIEWS = ["front", "left", "right"]
+
+
+def normalize_camera_views(camera_views: Sequence[str] | None) -> list[str]:
+    views = list(camera_views) if camera_views is not None else DEFAULT_CAMERA_VIEWS
+    if not views:
+        raise ValueError("camera_views must contain at least one camera view")
+
+    normalized = []
+    for view in views:
+        view_name = str(view).lower()
+        if view_name not in CAMERA_VIEW_TO_TOPIC:
+            valid = ", ".join(CAMERA_VIEW_TO_TOPIC)
+            raise ValueError(
+                f"Unsupported camera view '{view}'. Supported views: {valid}"
+            )
+        normalized.append(view_name)
+    return normalized
 
 
 def parse_missions_csv(missions_csv: Path) -> dict[str, str]:
@@ -35,21 +59,51 @@ def parse_missions_csv(missions_csv: Path) -> dict[str, str]:
 def pull_missions_from_hf(
     missions: list[str], topics: list[str], dataset_folder: Path
 ) -> Path:
-    allow_patterns = []
-    for mission, topic in product(missions, topics):
-        allow_patterns.append(f"{mission}/*{topic}*")
-
     log.info("Downloading missions from Hugging Face...")
-    hf_data_cache = snapshot_download(
-        repo_id="leggedrobotics/grand_tour_dataset",
-        revision="refs/pr/6",  # REMOVE LATER
-        allow_patterns=allow_patterns,
-        repo_type="dataset",
-    )
+    for mission, topic in product(missions, topics):
+        repo_file = get_repo_file(mission, topic)
+        extracted_path = get_extracted_topic_path(dataset_folder, mission, topic)
+        if has_extracted_contents(extracted_path):
+            log.info(f"Skipping existing topic: {extracted_path}")
+            continue
 
-    log.info(f"Extraction missions from HF cache at {hf_data_cache}...")
-    move_dataset(hf_data_cache, dataset_folder, allow_patterns=allow_patterns)
+        log.info(f"Downloading {repo_file}...")
+        cached_file = hf_hub_download(
+            repo_id="leggedrobotics/grand_tour_dataset",
+            filename=repo_file,
+            revision="refs/pr/6",  # REMOVE LATER
+            repo_type="dataset",
+        )
+
+        dest_path = dataset_folder / repo_file
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with tarfile.open(cached_file, "r") as tar:
+                tar.extractall(path=dest_path.parent)
+        except tarfile.ReadError as e:
+            log.error(f"Error opening or extracting tar file '{repo_file}': {e}")
+            raise
     return Path(dataset_folder)
+
+
+def get_repo_file(mission: str, topic: str) -> str:
+    if topic.startswith("hdr_"):
+        return f"{mission}/images/{topic}.tar"
+    if topic in {"teleop_paths", "geometric_paths"}:
+        return f"{mission}/data/{topic}.tar"
+    return f"{mission}/{topic}.tar"
+
+
+def get_extracted_topic_path(dataset_folder: Path, mission: str, topic: str) -> Path:
+    if topic.startswith("hdr_"):
+        return dataset_folder / mission / "images" / topic
+    if topic in {"teleop_paths", "geometric_paths"}:
+        return dataset_folder / mission / "data" / topic
+    return dataset_folder / mission / topic
+
+
+def has_extracted_contents(path: Path) -> bool:
+    return path.exists() and any(path.iterdir())
 
 
 def move_dataset(cache, dataset_folder, allow_patterns=["*"]):
@@ -100,12 +154,25 @@ class MissionDataset(Dataset):
         mission_name: str,
         transform: transforms.Compose,
         with_side_cams: bool = False,
+        return_image_seq: bool = False,
+        temporal_len: int = 4,
+        temporal_stride: int = 1,
+        camera_views: Sequence[str] | None = None,
     ):
         self.dataset_type = dataset_type
         self.dataset_folder = dataset_folder
         self.mission_name = mission_name
         self.transform = transform
         self.with_side_cams = with_side_cams
+        self.return_image_seq = return_image_seq
+        self.temporal_len = temporal_len
+        self.temporal_stride = temporal_stride
+        self.camera_views = normalize_camera_views(camera_views)
+
+        if self.temporal_len <= 0:
+            raise ValueError("temporal_len must be positive")
+        if self.temporal_stride <= 0:
+            raise ValueError("temporal_stride must be positive")
 
         mission_dir = dataset_folder / mission_name
         if not mission_dir.exists():
@@ -140,9 +207,27 @@ class MissionDataset(Dataset):
             raise FileNotFoundError(f"Image not found at {image_path}")
         return Image.open(image_path).convert("RGB")
 
+    def load_transformed_image(self, topic: str, idx: int) -> torch.Tensor:
+        return self.transform(self.load_image(topic, idx))
+
+    def get_temporal_indices(self, idx: int) -> list[int]:
+        return [
+            max(idx - step * self.temporal_stride, 0)
+            for step in range(self.temporal_len - 1, -1, -1)
+        ]
+
+    def load_image_seq(self, idx: int) -> torch.Tensor:
+        frames = []
+        for frame_idx in self.get_temporal_indices(idx):
+            views = []
+            for view in self.camera_views:
+                topic = CAMERA_VIEW_TO_TOPIC[view]
+                views.append(self.load_transformed_image(topic, frame_idx))
+            frames.append(torch.stack(views, dim=0))
+        return torch.stack(frames, dim=0)
+
     def __getitem__(self, idx):
-        image_front = self.load_image("hdr_front", idx)
-        image_front = self.transform(image_front)
+        image_front = self.load_transformed_image("hdr_front", idx)
 
         goal = torch.tensor(self.z["goal"][idx], dtype=torch.float32)
         path = torch.tensor(self.z["path"][idx], dtype=torch.float32)
@@ -154,13 +239,14 @@ class MissionDataset(Dataset):
         }
 
         if self.with_side_cams:
-            image_left = self.load_image("hdr_left", idx)
-            image_left = self.transform(image_left)
+            image_left = self.load_transformed_image("hdr_left", idx)
             batch["image_left"] = image_left
 
-            image_right = self.load_image("hdr_right", idx)
-            image_right = self.transform(image_right)
+            image_right = self.load_transformed_image("hdr_right", idx)
             batch["image_right"] = image_right
+
+        if self.return_image_seq:
+            batch["image_seq"] = self.load_image_seq(idx)
 
         return batch
 
@@ -171,18 +257,46 @@ def get_mission_dataset(
     mission_name: str,
     transform: transforms.Compose,
     with_side_cams: bool = False,
+    return_image_seq: bool = False,
+    temporal_len: int = 4,
+    temporal_stride: int = 1,
+    camera_views: Sequence[str] | None = None,
 ) -> Dataset:
     if dataset_type == "aug":
         geo_ds = MissionDataset(
-            "geo", dataset_folder, mission_name, transform, with_side_cams
+            "geo",
+            dataset_folder,
+            mission_name,
+            transform,
+            with_side_cams,
+            return_image_seq,
+            temporal_len,
+            temporal_stride,
+            camera_views,
         )
         tel_ds = MissionDataset(
-            "tel", dataset_folder, mission_name, transform, with_side_cams
+            "tel",
+            dataset_folder,
+            mission_name,
+            transform,
+            with_side_cams,
+            return_image_seq,
+            temporal_len,
+            temporal_stride,
+            camera_views,
         )
         return ConcatDataset([geo_ds, tel_ds])
     if dataset_type in ["tel", "geo"]:
         return MissionDataset(
-            dataset_type, dataset_folder, mission_name, transform, with_side_cams
+            dataset_type,
+            dataset_folder,
+            mission_name,
+            transform,
+            with_side_cams,
+            return_image_seq,
+            temporal_len,
+            temporal_stride,
+            camera_views,
         )
     else:
         raise ValueError(f"Invalid dataset_type: {dataset_type}")
@@ -194,8 +308,13 @@ def get_dataset(
     missions_csv: Path,
     with_side_cams: bool = False,
     image_size: Tuple[int, int] = (308, 476),
+    return_image_seq: bool = False,
+    temporal_len: int = 4,
+    temporal_stride: int = 1,
+    camera_views: Sequence[str] | None = None,
 ):
     missions = parse_missions_csv(missions_csv)
+    camera_views = normalize_camera_views(camera_views)
 
     transform = transforms.Compose(
         [
@@ -207,6 +326,9 @@ def get_dataset(
     topics = ["hdr_front"]
     if with_side_cams:
         topics += ["hdr_left", "hdr_right"]
+    if return_image_seq:
+        topics += [CAMERA_VIEW_TO_TOPIC[view] for view in camera_views]
+    topics = list(dict.fromkeys(topics))
     if dataset_type in ["tel", "aug"]:
         topics.append("teleop_paths")
     if dataset_type in ["geo", "aug"]:
@@ -220,7 +342,15 @@ def get_dataset(
     for mission, split in missions.items():
         datasets[split].append(
             get_mission_dataset(
-                dataset_type, datset_dir, mission, transform, with_side_cams
+                dataset_type=dataset_type,
+                dataset_folder=datset_dir,
+                mission_name=mission,
+                transform=transform,
+                with_side_cams=with_side_cams,
+                return_image_seq=return_image_seq,
+                temporal_len=temporal_len,
+                temporal_stride=temporal_stride,
+                camera_views=camera_views,
             )
         )
 

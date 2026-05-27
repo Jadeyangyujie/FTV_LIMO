@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - override /logger: wandb
+  - override /logger: csv
 
 tags: ["DEBUG", "limo", "D_aug"]
 
@@ -13,10 +13,6 @@ trainer:
   limit_test_batches: 0.05
 
 dataset:
-  missions_csv: ${paths.root_dir}/limo/configs/dataset/missions_split_example.csv
-
-logger:
-  wandb:
-    tags: ${tags}
+  missions_csv: ${paths.root_dir}/limo/configs/dataset/missions_split_debug_cached.csv
 
 seed: 12345
