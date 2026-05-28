@@ -1,0 +1,33 @@
+# @package _global_
+
+defaults:
+  - override /logger: csv
+  - override /model: limo_ftv
+
+tags: ["DEBUG", "limo_ftv", "D_aug"]
+
+trainer:
+  max_epochs: 1
+  limit_train_batches: 1
+  limit_val_batches: 1
+  limit_test_batches: 1
+
+dataset:
+  missions_csv: ${paths.root_dir}/limo/configs/dataset/mymissions_split_debug.csv
+  batch_size: 1
+  num_workers: 0
+  shuffle_train: false
+  return_image_seq: true
+  temporal_len: 4
+  temporal_stride: 1
+  camera_views: ["front", "left", "right"]
+
+model:
+  net:
+    pretrained: false
+    temporal_len: 4
+    num_views: 3
+    compressed_tokens: 16
+    view_tokens: 16
+
+seed: 12345
