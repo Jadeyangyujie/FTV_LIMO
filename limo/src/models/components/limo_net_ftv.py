@@ -287,15 +287,40 @@ class LimoNetFTV(nn.Module):
 
 
 if __name__ == "__main__":
-    model = LimoNetFTV(pretrained=False)
+    model = LimoNetFTV(pretrained=False, temporal_len=2)
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,}, trainable: {trainable_params:,}")
 
+    trainable_backbone_params = [
+        name for name, p in model.backbone.named_parameters() if p.requires_grad
+    ]
+    print("Trainable backbone parameters:")
+    for name in trainable_backbone_params:
+        print(f"  {name}")
+    if not trainable_backbone_params:
+        print("  <none>")
+
     batch = {
-        "image_seq": torch.randn(2, 4, 3, 3, 308, 476),
-        "goal": torch.randn(2, 3),
+        "image_seq": torch.randn(1, 2, 3, 3, 308, 476),
+        "goal": torch.randn(1, 3),
     }
     out = model(batch)
-    print("Output shape:", out.shape)  # expected (2, 50, 3)
+    print("Output shape:", out.shape)  # expected (1, 50, 3)
+
+    target = torch.randn_like(out)
+    loss = torch.nn.functional.mse_loss(out, target)
+    loss.backward()
+    print("loss:", loss.item())
+
+    grad_names = [
+        "compression_queries",
+        "view_queries",
+        "goal_proj.weight",
+        "out_proj.weight",
+    ]
+    params = dict(model.named_parameters())
+    for name in grad_names:
+        grad = params[name].grad
+        print(f"{name} grad is not None: {grad is not None}")

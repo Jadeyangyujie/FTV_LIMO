@@ -69,7 +69,7 @@ def _resolve_dataset_index(dataset: Dataset, idx: int) -> tuple[Dataset, int]:
 
 def _get_temporal_indices(
     dataset: Dataset, idx: int, temporal_len: int, temporal_stride: int
-) -> tuple[int, list[int]]:
+) -> tuple[int, list[int], list[int] | None]:
     leaf_dataset, local_idx = _resolve_dataset_index(dataset, idx)
     if hasattr(leaf_dataset, "get_temporal_indices"):
         indices = leaf_dataset.get_temporal_indices(local_idx)
@@ -78,7 +78,15 @@ def _get_temporal_indices(
             max(local_idx - step * temporal_stride, 0)
             for step in range(temporal_len - 1, -1, -1)
         ]
-    return local_idx, indices
+
+    if hasattr(leaf_dataset, "get_image_id"):
+        image_ids = [leaf_dataset.get_image_id(i) for i in indices]
+    elif hasattr(leaf_dataset, "image_ids"):
+        image_ids = [int(leaf_dataset.image_ids[i]) for i in indices]
+    else:
+        image_ids = None
+
+    return local_idx, indices, image_ids
 
 
 def _debug_dataloader(
@@ -143,7 +151,7 @@ def main(cfg: DictConfig) -> None:
         dataset_indices = batch["_dataset_index"].tolist()
         print("temporal index debug:")
         for sample_pos, dataset_idx in enumerate(dataset_indices[:5]):
-            local_idx, temporal_indices = _get_temporal_indices(
+            local_idx, temporal_indices, temporal_image_ids = _get_temporal_indices(
                 source_dataset,
                 int(dataset_idx),
                 temporal_len=temporal_len,
@@ -151,7 +159,8 @@ def main(cfg: DictConfig) -> None:
             )
             print(
                 f"sample {sample_pos}: dataset index={int(dataset_idx)}, "
-                f"local index={local_idx}, temporal indices={temporal_indices}"
+                f"local index={local_idx}, temporal indices={temporal_indices}, "
+                f"image_ids={temporal_image_ids}"
             )
     else:
         print("temporal index debug: <dataset indices missing>")

@@ -24,6 +24,7 @@ CAMERA_VIEW_TO_TOPIC = {
     "right": "hdr_right",
 }
 DEFAULT_CAMERA_VIEWS = ["front", "left", "right"]
+IMAGE_ID_KEYS = ("image_id", "image_ids", "frame_id", "frame_ids")
 
 
 def normalize_camera_views(camera_views: Sequence[str] | None) -> list[str]:
@@ -197,8 +198,43 @@ class MissionDataset(Dataset):
         else:
             raise ValueError(f"Invalid dataset_type: {dataset_type}")
 
+        self.image_id_key, self.image_ids = self.load_image_ids()
+        self.segment_start_indices = self.compute_segment_start_indices()
+
     def __len__(self):
         return len(self.z["path"])
+
+    def load_image_ids(self) -> tuple[str, list[int]]:
+        available_keys = set(self.z.array_keys())
+        for key in IMAGE_ID_KEYS:
+            if key not in available_keys:
+                continue
+            image_ids = [int(image_id) for image_id in self.z[key][:]]
+            if len(image_ids) != len(self):
+                raise ValueError(
+                    f"Image id field '{key}' has length {len(image_ids)}, "
+                    f"expected {len(self)}"
+                )
+            return key, image_ids
+
+        keys = ", ".join(sorted(available_keys))
+        raise KeyError(
+            "Could not find an image id field in path zarr. "
+            f"Tried {IMAGE_ID_KEYS}. Available array keys: {keys}"
+        )
+
+    def compute_segment_start_indices(self) -> list[int]:
+        segment_starts = [0] * len(self.image_ids)
+        for idx in range(1, len(self.image_ids)):
+            image_id_delta = self.image_ids[idx] - self.image_ids[idx - 1]
+            if 0 <= image_id_delta <= 1:
+                segment_starts[idx] = segment_starts[idx - 1]
+            else:
+                segment_starts[idx] = idx
+        return segment_starts
+
+    def get_image_id(self, idx: int) -> int:
+        return self.image_ids[idx]
 
     def load_image(self, topic: str, idx: int) -> Image.Image:
         image_path = (
@@ -206,7 +242,7 @@ class MissionDataset(Dataset):
             / self.mission_name
             / "images"
             / topic
-            / f"{self.z['image_id'][idx]:06d}.jpeg"
+            / f"{self.get_image_id(idx):06d}.jpeg"
         )
         if not image_path.exists():
             log.error(f"Image not found at {image_path}")
@@ -217,8 +253,9 @@ class MissionDataset(Dataset):
         return self.transform(self.load_image(topic, idx))
 
     def get_temporal_indices(self, idx: int) -> list[int]:
+        segment_start = self.segment_start_indices[idx]
         return [
-            max(idx - step * self.temporal_stride, 0)
+            max(idx - step * self.temporal_stride, segment_start)
             for step in range(self.temporal_len - 1, -1, -1)
         ]
 
