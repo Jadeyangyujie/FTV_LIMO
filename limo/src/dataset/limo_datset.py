@@ -57,8 +57,14 @@ def parse_missions_csv(missions_csv: Path) -> dict[str, str]:
 
 
 def pull_missions_from_hf(
-    missions: list[str], topics: list[str], dataset_folder: Path
+    missions: list[str],
+    topics: list[str],
+    dataset_folder: Path,
+    force_local: bool = False,
 ) -> Path:
+    if force_local:
+        log.info("`force_local` is True, skipping Hugging Face download.")
+        return Path(dataset_folder)
     log.info("Downloading missions from Hugging Face...")
     for mission, topic in product(missions, topics):
         repo_file = get_repo_file(mission, topic)

@@ -1,0 +1,18 @@
+# @package _global_
+
+defaults:
+  - override /logger: csv
+
+tags: ["DEBUG", "limo", "D_aug", "local"]
+
+trainer:
+  max_epochs: 5
+  limit_train_batches: 1
+  limit_val_batches: 1
+  limit_test_batches: 1
+
+dataset:
+  missions_csv: ${paths.root_dir}/limo/configs/dataset/mymissions_split_debug.csv
+  num_workers: 0
+
+seed: 12345
