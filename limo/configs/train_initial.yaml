@@ -1,0 +1,55 @@
+# @package _global_
+
+defaults:
+  - dataset: limo_local
+  - model: limo
+  - callbacks: default
+  - trainer: default
+  - paths: default
+  - extras: default
+  - hydra: default
+  - logger: csv
+  - _self_
+
+task_name: "train"
+
+tags: ["LIMO", "medium", "baseline", "epoch20"]
+
+ckpt_path: null
+
+seed: null
+
+dataset:
+  dataset_folder: ${oc.env:DATA_PARENT}
+  missions_csv: ${oc.env:REPO}/limo/configs/dataset/missions_split_ftv_medium.csv
+  dataset_type: aug
+
+  return_image_seq: false
+  with_side_cams: false
+
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+
+model:
+  net:
+    pretrained: true
+
+trainer:
+  max_epochs: 20
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+
+extras:
+  enforce_tags: false
+  print_config: false
+
+logger:
+  csv:
+    name: "csv"
+    prefix: ""
+
+hydra:
+  run:
+    dir: ${hydra:runtime.cwd}/logs/${task_name}/runs/original_limo/${now:%Y-%m-%d}_${now:%H-%M-%S}
