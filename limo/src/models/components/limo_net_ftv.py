@@ -50,12 +50,34 @@ class LimoNetFTV(nn.Module):
         if self._initialized:
             return
 
-        self.backbone = torch.hub.load(
-            "facebookresearch/dinov2",
-            self.backbone_name,
-            pretrained=self.pretrained,
-        )
+        # self.backbone = torch.hub.load(
+        #     "facebookresearch/dinov2",
+        #     self.backbone_name,
+        #     pretrained=self.pretrained,
+        # )
 
+
+        from pathlib import Path
+
+        local_dinov2 = Path(torch.hub.get_dir()) / "facebookresearch_dinov2_main"
+
+        if local_dinov2.exists():
+            print(f"[LimoNetFTV] Loading DINOv2 from local cache: {local_dinov2}")
+            self.backbone = torch.hub.load(
+                str(local_dinov2),
+                self.backbone_name,
+                pretrained=self.pretrained,
+                source="local",
+            )
+        else:
+            print("[LimoNetFTV] Local DINOv2 cache not found, loading from GitHub.")
+            self.backbone = torch.hub.load(
+                "facebookresearch/dinov2",
+                self.backbone_name,
+                pretrained=self.pretrained,
+                trust_repo=True,
+            )
+            
         for p in self.backbone.parameters():
             p.requires_grad = False
         for m in self.backbone.modules():

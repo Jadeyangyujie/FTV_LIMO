@@ -1,0 +1,8 @@
+ID,Short Name,Name,Timestamp,Size (GB),UUID,Split
+1,ETH-1,ETH - Polyterasse,2024-10-01-11-29-55,116.36,e97e35ad-dd7b-49c4-a158-95aba246520e,train
+2,ETH-2,ETH - Mainbuilding Indoor,2024-10-01-11-47-44,95.47,4ae7f9bc-ee51-4ba7-97c7-6a86fe765ab8,train
+3,ETH-3,ETH - Mainbuilding Outdoor,2024-10-01-12-00-49,82.26,da8f2265-5138-4d0b-8ae1-01e0015d1c58,train
+4,SPX-1,Jungfraujoch - Sphinx 1,2024-11-02-17-10-25,89.61,b845fb1b-310c-4236-a33c-c0d2c9a98092,train
+5,SPX-2,Jungfraujoch - Sphinx 2,2024-11-02-17-18-32,99.73,57b64279-18a3-451b-a516-51c1ea9c7e9a,test
+9,SNOW-2,Jungfraujoch - Snow 2,2024-11-03-07-57-34,73.94,82e5488f-7824-45c6-94be-b3c68ca32aa7,test
+24,HEAP-1,Heap Testsight 1,2024-11-14-13-45-37,96.13,512edee1-de86-463f-bdda-f55362e2fda1,val
