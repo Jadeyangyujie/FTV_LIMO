@@ -83,6 +83,9 @@ class LimoModel(LightningModule):
         self.log(
             "train/mae", self.train_mae, on_step=False, on_epoch=True, prog_bar=True
         )
+        self.log(
+            "learning_rate", self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True, on_epoch=False, prog_bar=True
+        )
 
         return {"loss": loss, "preds": preds}
 

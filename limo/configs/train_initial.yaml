@@ -21,7 +21,7 @@ seed: null
 
 dataset:
   dataset_folder: ${oc.env:DATA_PARENT}
-  missions_csv: ${oc.env:REPO}/limo/configs/dataset/missions_split_ftv_medium.csv
+  missions_csv: ${oc.env:REPO}/limo/configs/dataset/missions_split_ftv_valid.csv
   dataset_type: aug
 
   return_image_seq: false

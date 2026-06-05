@@ -260,14 +260,42 @@ class MissionDataset(Dataset):
         ]
 
     def load_image_seq(self, idx: int) -> torch.Tensor:
-        frames = []
-        for frame_idx in self.get_temporal_indices(idx):
-            views = []
+        frame_indices = self.get_temporal_indices(idx)
+
+        # Pre-collect all image paths
+        paths_to_load = []
+        for frame_idx in frame_indices:
             for view in self.camera_views:
                 topic = CAMERA_VIEW_TO_TOPIC[view]
-                views.append(self.load_transformed_image(topic, frame_idx))
-            frames.append(torch.stack(views, dim=0))
-        return torch.stack(frames, dim=0)
+                image_path = (
+                    self.dataset_folder
+                    / self.mission_name
+                    / "images"
+                    / topic
+                    / f"{self.get_image_id(frame_idx):06d}.jpeg"
+                )
+                paths_to_load.append(image_path)
+
+        # Batch-open and transform images
+        # This is still sequential but avoids repeated function call overhead.
+        # For true parallel loading, a more advanced custom loader or a library like `torchdata` might be needed.
+        all_images = []
+        for path in paths_to_load:
+            if not path.exists():
+                log.error(f"Image not found at {path}")
+                raise FileNotFoundError(f"Image not found at {path}")
+            image = Image.open(path).convert("RGB")
+            all_images.append(self.transform(image))
+
+        # Reshape the flat list of images into [temporal_len, num_views, C, H, W]
+        num_views = len(self.camera_views)
+        temporal_len = len(frame_indices)
+
+        # Create a stacked tensor and then view it in the desired shape
+        stacked_images = torch.stack(all_images, dim=0)
+        reshaped_tensor = stacked_images.view(temporal_len, num_views, *stacked_images.shape[1:])
+
+        return reshaped_tensor
 
     def __getitem__(self, idx):
         image_front = self.load_transformed_image("hdr_front", idx)
