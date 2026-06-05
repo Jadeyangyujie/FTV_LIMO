@@ -52,4 +52,4 @@ logger:
 
 hydra:
   run:
-    dir: ${hydra:runtime.cwd}/logs/${task_name}/runs/original_limo/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${hydra:runtime.cwd}/logs/${task_name}/original_limo/${now:%Y-%m-%d}_${now:%H-%M-%S}
