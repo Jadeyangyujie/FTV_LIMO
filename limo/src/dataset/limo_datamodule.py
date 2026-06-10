@@ -29,6 +29,8 @@ class LimoDataModule(LightningDataModule):
         temporal_len: int = 4,
         temporal_stride: int = 1,
         camera_views: Sequence[str] | None = None,
+        strict_camera_timestamp_alignment: bool = True,
+        return_current_images: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -48,6 +50,8 @@ class LimoDataModule(LightningDataModule):
         self.temporal_len = temporal_len
         self.temporal_stride = temporal_stride
         self.camera_views = camera_views
+        self.strict_camera_timestamp_alignment = strict_camera_timestamp_alignment
+        self.return_current_images = return_current_images
 
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
@@ -68,6 +72,8 @@ class LimoDataModule(LightningDataModule):
                 temporal_len=self.temporal_len,
                 temporal_stride=self.temporal_stride,
                 camera_views=self.camera_views,
+                strict_camera_timestamp_alignment=self.strict_camera_timestamp_alignment,
+                return_current_images=self.return_current_images,
             )
 
             self.data_train = splits.get("train")

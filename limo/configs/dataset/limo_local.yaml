@@ -26,4 +26,6 @@ image_size: [308, 476]
 return_image_seq: False
 temporal_len: 4
 temporal_stride: 1
-camera_views: ["front", "left", "right"]
+camera_views: null
+strict_camera_timestamp_alignment: true
+return_current_images: false

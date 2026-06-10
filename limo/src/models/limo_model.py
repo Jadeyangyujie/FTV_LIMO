@@ -74,7 +74,7 @@ class LimoModel(LightningModule):
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
 
-        if batch_idx < 3:
+        if batch_idx < 3 and "image_seq" in batch:
             p = next(self.parameters())
             print(
                 f"[DDP DEBUG] "
@@ -131,7 +131,7 @@ class LimoModel(LightningModule):
         dataloader_idx: int = 0,
     ) -> None:
         if self.trainer.is_global_zero and batch_idx == 0 and wandb.run is not None:
-            self.log_images_wandb(outputs, batch, split="train")
+            self.log_images_wandb(outputs, batch, split="val")
 
     def on_train_batch_end(
         self,
@@ -141,7 +141,7 @@ class LimoModel(LightningModule):
         dataloader_idx: int = 0,
     ):
         if self.trainer.is_global_zero and batch_idx == 0 and wandb.run is not None:
-            self.log_images_wandb(outputs, batch, split="val")
+            self.log_images_wandb(outputs, batch, split="train")
 
     def on_validation_epoch_end(self) -> None:
         cur_val_loss = self.val_loss.compute()
@@ -190,6 +190,100 @@ class LimoModel(LightningModule):
             }
         return {"optimizer": optimizer}
 
+    @staticmethod
+    def _to_image_np(tensor: torch.Tensor) -> np.ndarray:
+        """Convert [B, C, H, W] float images to uint8 [B, H, W, C]."""
+        tensor = tensor.detach().float().cpu().clamp(0.0, 1.0)
+        return (tensor.permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
+
+    @staticmethod
+    def _make_grid(images: np.ndarray, pad: int = 8) -> np.ndarray:
+        """Create a simple image grid from [rows, cols, H, W, C]."""
+        rows, cols, height, width, channels = images.shape
+        grid_h = rows * height + max(rows - 1, 0) * pad
+        grid_w = cols * width + max(cols - 1, 0) * pad
+        grid = np.ones((grid_h, grid_w, channels), dtype=np.uint8) * 255
+
+        for row in range(rows):
+            y0 = row * (height + pad)
+            for col in range(cols):
+                x0 = col * (width + pad)
+                grid[y0 : y0 + height, x0 : x0 + width] = images[row, col]
+        return grid
+
+    def _make_sequence_images(
+        self,
+        image_seq: torch.Tensor,
+        num_imgs: int,
+    ) -> list[wandb.Image]:
+        """Log FTV image_seq as rows=time and columns=view."""
+        image_seq = image_seq[:num_imgs].detach().float().cpu().clamp(0.0, 1.0)
+        if image_seq.ndim != 6:
+            return []
+
+        sequence_images = []
+        for sample_idx in range(image_seq.shape[0]):
+            sample = image_seq[sample_idx]  # [T, V, C, H, W]
+            sample_np = (
+                sample.permute(0, 1, 3, 4, 2).numpy() * 255
+            ).astype(np.uint8)
+            grid = self._make_grid(sample_np)
+            caption = (
+                f"sample={sample_idx}, rows=time old->current, "
+                "cols=view order from camera_views"
+            )
+            sequence_images.append(wandb.Image(grid, caption=caption))
+        return sequence_images
+
+    @staticmethod
+    def _make_path_error_table(
+        predicted_paths: np.ndarray,
+        ground_truth_paths: np.ndarray,
+        goals: np.ndarray,
+    ) -> wandb.Table:
+        columns = [
+            "sample",
+            "mean_xy_error",
+            "final_xy_error",
+            "mean_abs_theta_error",
+            "goal_x",
+            "goal_y",
+            "goal_theta",
+            "pred_final_x",
+            "pred_final_y",
+            "pred_final_theta",
+            "target_final_x",
+            "target_final_y",
+            "target_final_theta",
+        ]
+        table = wandb.Table(columns=columns)
+
+        xy_error = np.linalg.norm(
+            predicted_paths[..., :2] - ground_truth_paths[..., :2], axis=-1
+        )
+        theta_error = np.abs(predicted_paths[..., 2] - ground_truth_paths[..., 2])
+
+        for sample_idx in range(predicted_paths.shape[0]):
+            pred_final = predicted_paths[sample_idx, -1]
+            target_final = ground_truth_paths[sample_idx, -1]
+            goal = goals[sample_idx]
+            table.add_data(
+                sample_idx,
+                float(xy_error[sample_idx].mean()),
+                float(xy_error[sample_idx, -1]),
+                float(theta_error[sample_idx].mean()),
+                float(goal[0]),
+                float(goal[1]),
+                float(goal[2]),
+                float(pred_final[0]),
+                float(pred_final[1]),
+                float(pred_final[2]),
+                float(target_final[0]),
+                float(target_final[1]),
+                float(target_final[2]),
+            )
+        return table
+
     def log_images_wandb(
         self,
         outputs: Dict[str, torch.Tensor],
@@ -202,24 +296,37 @@ class LimoModel(LightningModule):
 
         # Get predictions, ground truth, and goals
         predicted_paths = outputs["preds"][:num_imgs].detach().cpu().numpy()
-        ground_truth_paths = batch["path"][:num_imgs].cpu().numpy()
+        ground_truth_paths = batch["path"][:num_imgs].detach().cpu().numpy()
+        goals_tensor = batch["goal"][:num_imgs]
+        goals = goals_tensor.detach().cpu().numpy()
 
-        # Get images
-        images = batch["image_front"][:num_imgs]
-        goals = batch["goal"][:num_imgs]
+        # Get images. FTV batches can omit duplicated current-frame images to
+        # reduce dataloader and device-transfer overhead.
+        if "image_front" in batch:
+            images = batch["image_front"][:num_imgs]
+        elif "image_seq" in batch:
+            images = batch["image_seq"][:num_imgs, -1, 0]
+        else:
+            raise KeyError("batch must contain image_front or image_seq for logging")
 
-        def _to_np(t: "torch.Tensor") -> np.ndarray:
-            return (t.cpu().permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
-
-        images = _to_np(images)
+        images = self._to_image_np(images)
         images_left = (
-            _to_np(batch["image_left"][:num_imgs]) if "image_left" in batch else None
+            self._to_image_np(batch["image_left"][:num_imgs])
+            if "image_left" in batch
+            else None
         )
         images_right = (
-            _to_np(batch["image_right"][:num_imgs]) if "image_right" in batch else None
+            self._to_image_np(batch["image_right"][:num_imgs])
+            if "image_right" in batch
+            else None
         )
 
-        goals = goals.cpu().numpy()
+        if "image_seq" in batch and batch["image_seq"].ndim == 6:
+            current_views = batch["image_seq"][:num_imgs, -1]
+            if images_left is None and current_views.shape[1] > 1:
+                images_left = self._to_image_np(current_views[:, 1])
+            if images_right is None and current_views.shape[1] > 2:
+                images_right = self._to_image_np(current_views[:, 2])
 
         visualizations = []
         for i in range(len(predicted_paths)):
@@ -233,4 +340,26 @@ class LimoModel(LightningModule):
             )
             visualizations.append(wandb.Image(combined_img))
 
-        wandb.log({f"{split}/predictions": visualizations})
+        xy_error = np.linalg.norm(
+            predicted_paths[..., :2] - ground_truth_paths[..., :2], axis=-1
+        )
+        theta_error = np.abs(predicted_paths[..., 2] - ground_truth_paths[..., 2])
+
+        log_payload: Dict[str, Any] = {
+            f"{split}/predictions": visualizations,
+            f"{split}/path_error_table": self._make_path_error_table(
+                predicted_paths, ground_truth_paths, goals
+            ),
+            f"{split}/viz_mean_xy_error": float(xy_error.mean()),
+            f"{split}/viz_final_xy_error": float(xy_error[:, -1].mean()),
+            f"{split}/viz_mean_abs_theta_error": float(theta_error.mean()),
+        }
+
+        if "image_seq" in batch:
+            sequence_images = self._make_sequence_images(
+                batch["image_seq"], num_imgs=min(3, num_imgs)
+            )
+            if sequence_images:
+                log_payload[f"{split}/image_sequence_grid"] = sequence_images
+
+        wandb.log(log_payload)

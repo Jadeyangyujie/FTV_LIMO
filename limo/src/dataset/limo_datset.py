@@ -2,6 +2,7 @@ import csv
 import re
 import shutil
 import tarfile
+from bisect import bisect_left
 from collections import defaultdict
 from itertools import product
 from pathlib import Path
@@ -27,8 +28,8 @@ DEFAULT_CAMERA_VIEWS = ["front", "left", "right"]
 IMAGE_ID_KEYS = ("image_id", "image_ids", "frame_id", "frame_ids")
 
 
-def normalize_camera_views(camera_views: Sequence[str] | None) -> list[str]:
-    views = list(camera_views) if camera_views is not None else DEFAULT_CAMERA_VIEWS
+def normalize_camera_views(camera_views: Sequence[str]) -> list[str]:
+    views = list(camera_views)
     if not views:
         raise ValueError("camera_views must contain at least one camera view")
 
@@ -42,6 +43,15 @@ def normalize_camera_views(camera_views: Sequence[str] | None) -> list[str]:
             )
         normalized.append(view_name)
     return normalized
+
+
+def resolve_camera_views(
+    camera_views: Sequence[str] | None,
+    with_side_cams: bool,
+) -> list[str]:
+    if camera_views is not None:
+        return normalize_camera_views(camera_views)
+    return DEFAULT_CAMERA_VIEWS.copy() if with_side_cams else ["front"]
 
 
 def parse_missions_csv(missions_csv: Path) -> dict[str, str]:
@@ -156,7 +166,7 @@ def move_dataset(cache, dataset_folder, allow_patterns=["*"]):
 class MissionDataset(Dataset):
     def __init__(
         self,
-        dataset_type: Literal["tel", "geo", "aug"],
+        dataset_type: Literal["tel", "geo"],
         dataset_folder: Path,
         mission_name: str,
         transform: transforms.Compose,
@@ -165,6 +175,8 @@ class MissionDataset(Dataset):
         temporal_len: int = 4,
         temporal_stride: int = 1,
         camera_views: Sequence[str] | None = None,
+        strict_camera_timestamp_alignment: bool = True,
+        return_current_images: bool = False,
     ):
         self.dataset_type = dataset_type
         self.dataset_folder = dataset_folder
@@ -174,7 +186,9 @@ class MissionDataset(Dataset):
         self.return_image_seq = return_image_seq
         self.temporal_len = temporal_len
         self.temporal_stride = temporal_stride
-        self.camera_views = normalize_camera_views(camera_views)
+        self.camera_views = resolve_camera_views(camera_views, with_side_cams)
+        self.strict_camera_timestamp_alignment = strict_camera_timestamp_alignment
+        self.return_current_images = return_current_images
 
         if self.temporal_len <= 0:
             raise ValueError("temporal_len must be positive")
@@ -186,6 +200,7 @@ class MissionDataset(Dataset):
             err = f"Mission dataset '{mission_name}' not found in {dataset_folder}"
             log.error(err)
             raise FileNotFoundError(err)
+        self.mission_dir = mission_dir
 
         if dataset_type == "tel":
             self.z = zarr.open_group(
@@ -199,6 +214,7 @@ class MissionDataset(Dataset):
             raise ValueError(f"Invalid dataset_type: {dataset_type}")
 
         self.image_id_key, self.image_ids = self.load_image_ids()
+        self.validate_image_id_order()
         self.segment_start_indices = self.compute_segment_start_indices()
 
         (
@@ -207,6 +223,8 @@ class MissionDataset(Dataset):
             self.sample_to_unique_pos,
             self.unique_segment_start_pos,
         ) = self.build_unique_frame_index()
+        self.camera_timestamps = self.load_camera_timestamps()
+        self.validate_camera_timestamps()
 
     def __len__(self):
         return len(self.z["path"])
@@ -292,6 +310,19 @@ class MissionDataset(Dataset):
             f"Tried {IMAGE_ID_KEYS}. Available array keys: {keys}"
         )
 
+    def validate_image_id_order(self) -> None:
+        num_backward = 0
+        for idx in range(1, len(self.image_ids)):
+            if self.image_ids[idx] < self.image_ids[idx - 1]:
+                num_backward += 1
+
+        if num_backward > 0:
+            log.warning(
+                f"{self.mission_name}/{self.dataset_type}: image_ids contain "
+                f"{num_backward} backward jumps. Temporal indexing assumes samples "
+                "are ordered by image_id."
+            )
+
     def compute_segment_start_indices(self) -> list[int]:
         segment_starts = [0] * len(self.image_ids)
         for idx in range(1, len(self.image_ids)):
@@ -305,18 +336,82 @@ class MissionDataset(Dataset):
     def get_image_id(self, idx: int) -> int:
         return self.image_ids[idx]
 
+    def load_camera_timestamps(self) -> dict[str, list[float]]:
+        timestamps: dict[str, list[float]] = {}
+        for topic in set(CAMERA_VIEW_TO_TOPIC.values()):
+            zarr_dir = self.mission_dir / "data" / topic
+            if not zarr_dir.exists():
+                continue
+            try:
+                z = zarr.open_group(str(zarr_dir), mode="r")
+                if "timestamp" not in set(z.array_keys()):
+                    continue
+                timestamps[topic] = [float(ts) for ts in z["timestamp"][:]]
+            except Exception as exc:
+                log.warning(f"Could not load timestamps for {topic}: {exc}")
+        return timestamps
+
+    def validate_camera_timestamps(self) -> None:
+        if len(self.camera_views) <= 1:
+            return
+
+        required_topics = [CAMERA_VIEW_TO_TOPIC[view] for view in self.camera_views]
+        missing = [
+            topic for topic in required_topics if topic not in self.camera_timestamps
+        ]
+        if not missing:
+            return
+
+        message = (
+            f"{self.mission_name}/{self.dataset_type}: missing camera timestamps "
+            f"for {missing}. Multi-view training needs timestamp alignment; "
+            "falling back to same image_id may misalign cameras."
+        )
+        if self.strict_camera_timestamp_alignment:
+            raise RuntimeError(message)
+        log.warning(message)
+
+    @staticmethod
+    def nearest_timestamp_index(timestamps: list[float], target: float) -> int:
+        if not timestamps:
+            raise ValueError("timestamps must not be empty")
+        pos = bisect_left(timestamps, target)
+        if pos == 0:
+            return 0
+        if pos >= len(timestamps):
+            return len(timestamps) - 1
+        before = timestamps[pos - 1]
+        after = timestamps[pos]
+        return pos - 1 if (target - before) <= (after - target) else pos
+
+    def get_topic_image_id(self, topic: str, idx: int) -> int:
+        front_image_id = self.get_image_id(idx)
+        if topic == "hdr_front":
+            return front_image_id
+
+        front_timestamps = self.camera_timestamps.get("hdr_front")
+        topic_timestamps = self.camera_timestamps.get(topic)
+        if front_timestamps is None or topic_timestamps is None:
+            return front_image_id
+        if front_image_id < 0 or front_image_id >= len(front_timestamps):
+            return front_image_id
+
+        front_timestamp = front_timestamps[front_image_id]
+        return self.nearest_timestamp_index(topic_timestamps, front_timestamp)
+
     def load_image(self, topic: str, idx: int) -> Image.Image:
+        image_id = self.get_topic_image_id(topic, idx)
         image_path = (
-            self.dataset_folder
-            / self.mission_name
+            self.mission_dir
             / "images"
             / topic
-            / f"{self.get_image_id(idx):06d}.jpeg"
+            / f"{image_id:06d}.jpeg"
         )
         if not image_path.exists():
             log.error(f"Image not found at {image_path}")
             raise FileNotFoundError(f"Image not found at {image_path}")
-        return Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as image:
+            return image.convert("RGB")
 
     def load_transformed_image(self, topic: str, idx: int) -> torch.Tensor:
         return self.transform(self.load_image(topic, idx))
@@ -337,11 +432,10 @@ class MissionDataset(Dataset):
             for view in self.camera_views:
                 topic = CAMERA_VIEW_TO_TOPIC[view]
                 image_path = (
-                    self.dataset_folder
-                    / self.mission_name
+                    self.mission_dir
                     / "images"
                     / topic
-                    / f"{self.get_image_id(frame_idx):06d}.jpeg"
+                    / f"{self.get_topic_image_id(topic, frame_idx):06d}.jpeg"
                 )
                 paths_to_load.append(image_path)
 
@@ -353,8 +447,9 @@ class MissionDataset(Dataset):
             if not path.exists():
                 log.error(f"Image not found at {path}")
                 raise FileNotFoundError(f"Image not found at {path}")
-            image = Image.open(path).convert("RGB")
-            all_images.append(self.transform(image))
+            with Image.open(path) as image:
+                image = image.convert("RGB")
+                all_images.append(self.transform(image))
 
         # Reshape the flat list of images into [temporal_len, num_views, C, H, W]
         num_views = len(self.camera_views)
@@ -403,18 +498,19 @@ class MissionDataset(Dataset):
             image_seq = self.load_image_seq(idx)
             batch["image_seq"] = image_seq
 
-            # image_seq: [T, V, C, H, W]
-            view_to_pos = {view: i for i, view in enumerate(self.camera_views)}
-            current_images = image_seq[-1]
+            if self.return_current_images:
+                # image_seq: [T, V, C, H, W]
+                view_to_pos = {view: i for i, view in enumerate(self.camera_views)}
+                current_images = image_seq[-1]
 
-            if "front" in view_to_pos:
-                batch["image_front"] = current_images[view_to_pos["front"]]
+                if "front" in view_to_pos:
+                    batch["image_front"] = current_images[view_to_pos["front"]]
 
-            if self.with_side_cams:
-                if "left" in view_to_pos:
-                    batch["image_left"] = current_images[view_to_pos["left"]]
-                if "right" in view_to_pos:
-                    batch["image_right"] = current_images[view_to_pos["right"]]
+                if self.with_side_cams:
+                    if "left" in view_to_pos:
+                        batch["image_left"] = current_images[view_to_pos["left"]]
+                    if "right" in view_to_pos:
+                        batch["image_right"] = current_images[view_to_pos["right"]]
 
             return batch
 
@@ -436,6 +532,8 @@ def get_mission_dataset(
     temporal_len: int = 4,
     temporal_stride: int = 1,
     camera_views: Sequence[str] | None = None,
+    strict_camera_timestamp_alignment: bool = True,
+    return_current_images: bool = False,
 ) -> Dataset:
     if dataset_type == "aug":
         geo_ds = MissionDataset(
@@ -448,6 +546,8 @@ def get_mission_dataset(
             temporal_len,
             temporal_stride,
             camera_views,
+            strict_camera_timestamp_alignment,
+            return_current_images,
         )
         tel_ds = MissionDataset(
             "tel",
@@ -459,6 +559,8 @@ def get_mission_dataset(
             temporal_len,
             temporal_stride,
             camera_views,
+            strict_camera_timestamp_alignment,
+            return_current_images,
         )
         return ConcatDataset([geo_ds, tel_ds])
     if dataset_type in ["tel", "geo"]:
@@ -472,6 +574,8 @@ def get_mission_dataset(
             temporal_len,
             temporal_stride,
             camera_views,
+            strict_camera_timestamp_alignment,
+            return_current_images,
         )
     else:
         raise ValueError(f"Invalid dataset_type: {dataset_type}")
@@ -487,9 +591,11 @@ def get_dataset(
     temporal_len: int = 4,
     temporal_stride: int = 1,
     camera_views: Sequence[str] | None = None,
+    strict_camera_timestamp_alignment: bool = True,
+    return_current_images: bool = False,
 ):
     missions = parse_missions_csv(missions_csv)
-    camera_views = normalize_camera_views(camera_views)
+    camera_views = resolve_camera_views(camera_views, with_side_cams)
 
     transform = transforms.Compose(
         [
@@ -526,6 +632,8 @@ def get_dataset(
                 temporal_len=temporal_len,
                 temporal_stride=temporal_stride,
                 camera_views=camera_views,
+                strict_camera_timestamp_alignment=strict_camera_timestamp_alignment,
+                return_current_images=return_current_images,
             )
         )
 
