@@ -146,6 +146,9 @@ class LocalLimoDataModule(LightningDataModule):
             shuffle=self.shuffle_train,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=4 if self.num_workers > 0 else None,
+            drop_last=True,
         )
 
     def val_dataloader(self) -> DataLoader[Any]:
@@ -157,6 +160,8 @@ class LocalLimoDataModule(LightningDataModule):
             shuffle=self.shuffle_val,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=2 if self.num_workers > 0 else None,
         )
 
     def test_dataloader(self) -> DataLoader[Any]:

@@ -73,18 +73,34 @@ class LimoModel(LightningModule):
     def training_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
+
+        if batch_idx < 3:
+            p = next(self.parameters())
+            print(
+                f"[DDP DEBUG] "
+                f"global_rank={self.global_rank}, "
+                f"local_rank={self.local_rank}, "
+                f"batch_idx={batch_idx}, "
+                f"param_device={p.device}, "
+                f"image_seq_device={batch['image_seq'].device}, "
+                f"goal_device={batch['goal'].device}, "
+                f"cuda_mem={torch.cuda.memory_allocated() / 1024**2:.1f} MiB",
+                flush=True,
+            )
+
+            
         loss, preds, targets = self.model_step(batch)
         self.train_loss(loss)
         self.train_mae(preds, targets)
 
         self.log(
-            "train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True
+            "train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True,
         )
         self.log(
-            "train/mae", self.train_mae, on_step=False, on_epoch=True, prog_bar=True
+            "train/mae", self.train_mae, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True,
         )
         self.log(
-            "learning_rate", self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True, on_epoch=False, prog_bar=True
+            "learning_rate", self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True, on_epoch=False, prog_bar=True,sync_dist=False,
         )
 
         return {"loss": loss, "preds": preds}
@@ -96,8 +112,8 @@ class LimoModel(LightningModule):
         self.val_loss(loss)
         self.val_mae(preds, targets)
 
-        self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/mae", self.val_mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True)
+        self.log("val/mae", self.val_mae, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True)
 
         return {"loss": loss, "preds": preds}
 
@@ -114,8 +130,8 @@ class LimoModel(LightningModule):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> None:
-        if batch_idx == 0 and wandb.run is not None:
-            self.log_images_wandb(outputs, batch, split="val")
+        if self.trainer.is_global_zero and batch_idx == 0 and wandb.run is not None:
+            self.log_images_wandb(outputs, batch, split="train")
 
     def on_train_batch_end(
         self,
@@ -124,8 +140,8 @@ class LimoModel(LightningModule):
         batch_idx: int,
         dataloader_idx: int = 0,
     ):
-        if batch_idx == 0 and wandb.run is not None:
-            self.log_images_wandb(outputs, batch, split="train")
+        if self.trainer.is_global_zero and batch_idx == 0 and wandb.run is not None:
+            self.log_images_wandb(outputs, batch, split="val")
 
     def on_validation_epoch_end(self) -> None:
         cur_val_loss = self.val_loss.compute()
@@ -140,9 +156,9 @@ class LimoModel(LightningModule):
         self.test_mae(preds, targets)
 
         self.log(
-            "test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True
+            "test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True
         )
-        self.log("test/mae", self.test_mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/mae", self.test_mae, on_step=False, on_epoch=True, prog_bar=True,sync_dist=True)
 
     def setup(self, stage: str) -> None:
         self.net.setup()
@@ -158,7 +174,7 @@ class LimoModel(LightningModule):
 
         :return: A dict containing the configured optimizers and learning-rate schedulers to be used for training.
         """
-        optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())
+        optimizer = self.hparams.optimizer(params=self.parameters())
         if self.hparams.scheduler is not None:
             total_steps = self.trainer.estimated_stepping_batches
             scheduler = self.hparams.scheduler(

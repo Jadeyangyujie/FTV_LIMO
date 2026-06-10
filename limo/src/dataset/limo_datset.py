@@ -201,8 +201,77 @@ class MissionDataset(Dataset):
         self.image_id_key, self.image_ids = self.load_image_ids()
         self.segment_start_indices = self.compute_segment_start_indices()
 
+        (
+            self.unique_image_ids,
+            self.unique_first_sample_indices,
+            self.sample_to_unique_pos,
+            self.unique_segment_start_pos,
+        ) = self.build_unique_frame_index()
+
     def __len__(self):
         return len(self.z["path"])
+
+
+    def build_unique_frame_index(self):
+        unique_image_ids = []
+        unique_first_sample_indices = []
+        sample_to_unique_pos = [0] * len(self.image_ids)
+        unique_segment_start_pos = []
+
+        current_segment_start_pos = 0
+        last_unique_image_id = None
+        last_unique_pos = None
+
+        for sample_idx, image_id in enumerate(self.image_ids):
+            image_id = int(image_id)
+
+            if last_unique_image_id is not None and image_id == last_unique_image_id:
+                sample_to_unique_pos[sample_idx] = last_unique_pos
+                continue
+
+            unique_pos = len(unique_image_ids)
+
+            if last_unique_image_id is not None:
+                image_id_delta = image_id - last_unique_image_id
+                if not (0 <= image_id_delta <= 1):
+                    current_segment_start_pos = unique_pos
+
+            unique_image_ids.append(image_id)
+            unique_first_sample_indices.append(sample_idx)
+            unique_segment_start_pos.append(current_segment_start_pos)
+
+            sample_to_unique_pos[sample_idx] = unique_pos
+            last_unique_image_id = image_id
+            last_unique_pos = unique_pos
+
+        return (
+            unique_image_ids,
+            unique_first_sample_indices,
+            sample_to_unique_pos,
+            unique_segment_start_pos,
+        )
+
+
+    def get_temporal_indices(self, idx: int) -> list[int]:
+        current_unique_pos = self.sample_to_unique_pos[idx]
+        segment_start_pos = self.unique_segment_start_pos[current_unique_pos]
+
+        temporal_unique_positions = [
+            max(current_unique_pos - step * self.temporal_stride, segment_start_pos)
+            for step in range(self.temporal_len - 1, -1, -1)
+        ]
+
+        return [
+            self.unique_first_sample_indices[pos]
+            for pos in temporal_unique_positions
+        ]
+
+
+    def get_temporal_image_ids(self, idx: int) -> list[int]:
+        temporal_indices = self.get_temporal_indices(idx)
+        return [self.get_image_id(i) for i in temporal_indices]
+
+
 
     def load_image_ids(self) -> tuple[str, list[int]]:
         available_keys = set(self.z.array_keys())
@@ -252,12 +321,12 @@ class MissionDataset(Dataset):
     def load_transformed_image(self, topic: str, idx: int) -> torch.Tensor:
         return self.transform(self.load_image(topic, idx))
 
-    def get_temporal_indices(self, idx: int) -> list[int]:
-        segment_start = self.segment_start_indices[idx]
-        return [
-            max(idx - step * self.temporal_stride, segment_start)
-            for step in range(self.temporal_len - 1, -1, -1)
-        ]
+    # def get_temporal_indices(self, idx: int) -> list[int]:
+    #     segment_start = self.segment_start_indices[idx]
+    #     return [
+    #         max(idx - step * self.temporal_stride, segment_start)
+    #         for step in range(self.temporal_len - 1, -1, -1)
+    #     ]
 
     def load_image_seq(self, idx: int) -> torch.Tensor:
         frame_indices = self.get_temporal_indices(idx)
@@ -297,30 +366,65 @@ class MissionDataset(Dataset):
 
         return reshaped_tensor
 
-    def __getitem__(self, idx):
-        image_front = self.load_transformed_image("hdr_front", idx)
+    # def __getitem__(self, idx):
+    #     image_front = self.load_transformed_image("hdr_front", idx)
 
+    #     goal = torch.tensor(self.z["goal"][idx], dtype=torch.float32)
+    #     path = torch.tensor(self.z["path"][idx], dtype=torch.float32)
+
+    #     batch = {
+    #         "image_front": image_front,
+    #         "goal": goal,
+    #         "path": path,
+    #     }
+
+    #     if self.with_side_cams:
+    #         image_left = self.load_transformed_image("hdr_left", idx)
+    #         batch["image_left"] = image_left
+
+    #         image_right = self.load_transformed_image("hdr_right", idx)
+    #         batch["image_right"] = image_right
+
+    #     if self.return_image_seq:
+    #         batch["image_seq"] = self.load_image_seq(idx)
+
+    #     return batch
+
+    def __getitem__(self, idx):
         goal = torch.tensor(self.z["goal"][idx], dtype=torch.float32)
         path = torch.tensor(self.z["path"][idx], dtype=torch.float32)
 
         batch = {
-            "image_front": image_front,
             "goal": goal,
             "path": path,
         }
 
-        if self.with_side_cams:
-            image_left = self.load_transformed_image("hdr_left", idx)
-            batch["image_left"] = image_left
-
-            image_right = self.load_transformed_image("hdr_right", idx)
-            batch["image_right"] = image_right
-
         if self.return_image_seq:
-            batch["image_seq"] = self.load_image_seq(idx)
+            image_seq = self.load_image_seq(idx)
+            batch["image_seq"] = image_seq
+
+            # image_seq: [T, V, C, H, W]
+            view_to_pos = {view: i for i, view in enumerate(self.camera_views)}
+            current_images = image_seq[-1]
+
+            if "front" in view_to_pos:
+                batch["image_front"] = current_images[view_to_pos["front"]]
+
+            if self.with_side_cams:
+                if "left" in view_to_pos:
+                    batch["image_left"] = current_images[view_to_pos["left"]]
+                if "right" in view_to_pos:
+                    batch["image_right"] = current_images[view_to_pos["right"]]
+
+            return batch
+
+        batch["image_front"] = self.load_transformed_image("hdr_front", idx)
+
+        if self.with_side_cams:
+            batch["image_left"] = self.load_transformed_image("hdr_left", idx)
+            batch["image_right"] = self.load_transformed_image("hdr_right", idx)
 
         return batch
-
 
 def get_mission_dataset(
     dataset_type: Literal["tel", "geo", "aug"],
